@@ -21,32 +21,39 @@ detects that specific case and corrects the rendering.
 
 ## How it works
 
-The mod adds a button labeled **עברית** above the prompt. Pressing it toggles
-a session-scoped setting that controls whether message text is rewritten
-before display.
+The mod adds a button above the prompt. Its label shows the current state
+(`עברית: פעיל` on, `עברית: כבוי` off); pressing it toggles a session-scoped setting. The
+button is drawn alongside whatever else the band shows (surveys, other mods).
 
 While the toggle is on, every line of every `UserMessage` and
-`AssistantMessage` is inspected individually:
+`AssistantMessage` is inspected individually. A line is wrapped in a Unicode
+bidi **isolate** (RLI U+2067 ... PDI U+2069) only when all of these hold:
 
-- A line that contains a Hebrew/Arabic character, and whose first
-  strong-directional character is **not** itself Hebrew/Arabic (i.e. an
-  English-leading line with embedded RTL text), is wrapped in Unicode bidi
-  control characters (RLE … PDF) so the embedded segment renders in correct
-  order.
-- A line that already starts with Hebrew/Arabic text is left untouched — the
-  bidi algorithm already renders it correctly, and rewriting it would be
-  redundant.
-- A line with no RTL characters at all (pure English or code) is left
-  untouched.
+- it starts (after any markdown prefix) with a Latin letter;
+- it is predominantly RTL: RTL letters (Hebrew, Arabic and their supplement and
+  presentation-form blocks) make up more than `RTL_DOMINANCE_THRESHOLD` (0.5) of
+  its Hebrew/Arabic + Latin letters. An English sentence with one Hebrew word is
+  therefore left alone.
+
+Everything else is untouched:
+
+- Hebrew/Arabic-leading lines (the bidi algorithm already handles them) and
+  lines with no RTL text.
+- Lines inside fenced code blocks (``` or ~~~) and the fence lines themselves.
+- Indented (4 spaces / tab) code lines and table rows (`|`); table rows are
+  skipped entirely rather than wrapped per cell.
+- Lines already wrapped (RLI, or the legacy RLE from older versions).
+
+The markdown prefix (indentation, `>` quotes, `-`/`*`/`+`/`1.` list markers,
+task checkboxes, `#` headings) stays at column 0; the RLI is inserted after it.
+For CRLF text the PDI goes before the trailing ``.
 
 While the toggle is off, no message text is modified.
 
 ## Usage
 
 1. Open Claude Code with this mod enabled.
-2. Click the **עברית** button above the prompt to turn the correction on or
-   off. The button's label reflects the current state (`עברית: פעיל` /
-   `עברית: כבוי`).
+2. Click the button above the prompt to turn the correction on or off.
 3. Messages are re-rendered according to the rules above for as long as the
    toggle stays on, for the duration of the session.
 
@@ -70,8 +77,8 @@ there is no supported way for this mod to control block-level alignment.
 
 ## Testing
 
-Unit tests live in `hooks/rtl-toggle.test.ts` and cover both the `terminal`
-and `desktop` surfaces. Run them with:
+The text rules are pure functions in `hooks/rtl.ts`, tested directly and through
+the engine in `hooks/rtl-toggle.test.ts` (both `terminal` and `desktop` surfaces). Run them with:
 
 ```
 claude plugin test <path-to-this-folder>
