@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { PDI, RLI, toRtl, wrapLineIfNeeded } from './rtl'
+import { RLM, toRtl, wrapLineIfNeeded } from './rtl'
 
 const HEBREW_LEADING = '## \u05DB\u05D5\u05EA\u05E8\u05EA' // "## <Hebrew word>"
 const MIXED = 'Mixed \u05E2\u05D1\u05E8\u05D9\u05EA \u05DE\u05D0\u05D5\u05D3 \u05E9\u05DC\u05D5\u05DD text' // 3 Hebrew words vs 2 English
@@ -11,17 +11,48 @@ const ENGLISH_WITH_ONE_HEBREW = 'Use the flag --force, also known as \u05DB\u05E
 const PUNCTUATION_ONLY = '--- 12:34 --- 99%'
 const ARABIC = 'Note: \u0645\u0631\u062D\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645 \u0647\u0630\u0627 \u0646\u0635'
 const MIXED_MULTILINE = [HEBREW_LEADING, MIXED, PURE_ENGLISH].join('\n')
+const TIE_QUOTE = '> PR חייב לעבור review לפני merge' // 3 RTL words vs 3 Latin
+const TASK_ITEM = '- [ ] Review לקוד לפני merge' // 2 vs 2
+const LINK_LINE = '[GitHub](https://github.com/Amitro123/RTL-claude-mod) הוא המקום שבו נמצא הקוד של הפרויקט'
+const URL_LINE = 'Docs at https://example.com/a/b/c נמצאים כאן בתיקייה' // URL ignored: 3 RTL vs 2 Latin
+const AUTOLINK_LINE = 'See <https://example.com/very/long> עברית כאן'
+const REF_LINE = 'Read [docs][somelabel] ועוד כאן' // 2 vs 2 once the ref label is ignored
+const ENGLISH_DOMINANT_1 = 'Run the full build and then the test suite, ואז deploy'
+const ENGLISH_DOMINANT_2 = 'Use the flag --force, also known as כפייה, only when needed.'
+const ENGLISH_DOMINANT_3 = 'Go see https://example.com/x עברית' // 2 Latin vs 1 RTL
+const TIE_URL_ONE_EACH = 'See https://example.com/x/y/z/w עברית' // 1 vs 1
+const GITHUB_ACTIONS = 'GitHub Actions צריך לרוץ על כל commit חדש' // 5 RTL vs 3 Latin
+const MIXED_ONE_VS_TWO = 'Mixed עברית text'
 const LABEL_OFF = '\u05E2\u05D1\u05E8\u05D9\u05EA: \u05DB\u05D1\u05D5\u05D9'
 const LABEL_ON = '\u05E2\u05D1\u05E8\u05D9\u05EA: \u05E4\u05E2\u05D9\u05DC'
 
 // --- pure functions -------------------------------------------------------
 
-test('wrapLineIfNeeded: Hebrew-dominant English-leading line is wrapped in isolates', () => {
-  expect(wrapLineIfNeeded(MIXED)).toBe(`${RLI}${MIXED}${PDI}`)
+test('wrapLineIfNeeded: Hebrew-dominant English-leading line gets a leading RLM', () => {
+  expect(wrapLineIfNeeded(MIXED)).toBe(`${RLM}${MIXED}`)
 })
 
 test('wrapLineIfNeeded: English-dominant line with one Hebrew word is untouched', () => {
   expect(wrapLineIfNeeded(ENGLISH_WITH_ONE_HEBREW)).toBe(ENGLISH_WITH_ONE_HEBREW)
+})
+
+test('wrapLineIfNeeded: word counting, ties go to RTL', () => {
+  for (const [prefix, line] of [['> ', TIE_QUOTE], ['- [ ] ', TASK_ITEM], ['', GITHUB_ACTIONS], ['', TIE_URL_ONE_EACH]]) {
+    const body = line.slice(prefix.length)
+    expect(wrapLineIfNeeded(line)).toBe(`${prefix}${RLM}${body}`)
+  }
+})
+
+test('wrapLineIfNeeded: Latin-dominant lines are untouched', () => {
+  for (const s of [ENGLISH_DOMINANT_1, ENGLISH_DOMINANT_2, ENGLISH_DOMINANT_3, MIXED_ONE_VS_TWO]) {
+    expect(wrapLineIfNeeded(s)).toBe(s)
+  }
+})
+
+test('wrapLineIfNeeded: link and URL text is ignored when counting, output text is unchanged', () => {
+  for (const s of [LINK_LINE, URL_LINE, AUTOLINK_LINE, REF_LINE]) {
+    expect(wrapLineIfNeeded(s)).toBe(`${RLM}${s}`)
+  }
 })
 
 test('wrapLineIfNeeded: Hebrew-leading, pure English and punctuation lines are untouched', () => {
@@ -31,25 +62,26 @@ test('wrapLineIfNeeded: Hebrew-leading, pure English and punctuation lines are u
 })
 
 test('wrapLineIfNeeded: Arabic line is wrapped', () => {
-  expect(wrapLineIfNeeded(ARABIC)).toBe(`${RLI}${ARABIC}${PDI}`)
+  expect(wrapLineIfNeeded(ARABIC)).toBe(`${RLM}${ARABIC}`)
 })
 
 test('wrapLineIfNeeded: Arabic presentation forms count as RTL', () => {
   const s = 'Note: \uFE8D\uFE8E\uFE8D\uFE8E\uFE8D\uFE8E'
-  expect(wrapLineIfNeeded(s)).toBe(`${RLI}${s}${PDI}`)
+  expect(wrapLineIfNeeded(s)).toBe(`${RLM}${s}`)
 })
 
-test('wrapLineIfNeeded: already-wrapped line (RLI or legacy RLE) is not wrapped twice', () => {
+test('wrapLineIfNeeded: already-marked line (RLM or legacy RLI/RLE) is not marked twice', () => {
   const once = wrapLineIfNeeded(MIXED)
   expect(wrapLineIfNeeded(once)).toBe(once)
-  const legacy = `\u202B${MIXED}\u202C`
-  expect(wrapLineIfNeeded(legacy)).toBe(legacy)
+  for (const legacy of [`\u202B${MIXED}\u202C`, `\u2067${MIXED}\u2069`]) {
+    expect(wrapLineIfNeeded(legacy)).toBe(legacy)
+  }
   expect(wrapLineIfNeeded(`- ${once}`)).toBe(`- ${once}`)
 })
 
 test('wrapLineIfNeeded: markdown prefixes stay at column 0', () => {
   for (const prefix of ['- ', '* ', '+ ', '1. ', '12) ', '# ', '### ', '> ', '> > ', '  - ', '- [x] ', '1. ']) {
-    expect(wrapLineIfNeeded(prefix + MIXED)).toBe(`${prefix}${RLI}${MIXED}${PDI}`)
+    expect(wrapLineIfNeeded(prefix + MIXED)).toBe(`${prefix}${RLM}${MIXED}`)
   }
 })
 
@@ -60,16 +92,16 @@ test('wrapLineIfNeeded: table rows and indented code are left untouched', () => 
 })
 
 test('wrapLineIfNeeded: nested (4-space) list item is still wrapped after its prefix', () => {
-  expect(wrapLineIfNeeded(`    - ${MIXED}`)).toBe(`    - ${RLI}${MIXED}${PDI}`)
+  expect(wrapLineIfNeeded(`    - ${MIXED}`)).toBe(`    - ${RLM}${MIXED}`)
 })
 
 test('toRtl: fenced code blocks and fence lines are untouched', () => {
   for (const f of ['```', '~~~', '````']) {
     const text = [MIXED, `${f}ts`, MIXED, f, MIXED].join('\n')
     const lines = toRtl(text).split('\n')
-    expect(lines[0]).toBe(`${RLI}${MIXED}${PDI}`)
+    expect(lines[0]).toBe(`${RLM}${MIXED}`)
     expect(lines.slice(1, 4)).toEqual([`${f}ts`, MIXED, f])
-    expect(lines[4]).toBe(`${RLI}${MIXED}${PDI}`)
+    expect(lines[4]).toBe(`${RLM}${MIXED}`)
   }
 })
 
@@ -77,11 +109,127 @@ test('toRtl: a shorter or different fence does not close a block', () => {
   const text = ['````', '```', MIXED, '~~~~', MIXED, '````', MIXED].join('\n')
   const lines = toRtl(text).split('\n')
   expect(lines.slice(0, 6)).toEqual(['````', '```', MIXED, '~~~~', MIXED, '````'])
-  expect(lines[6]).toBe(`${RLI}${MIXED}${PDI}`)
+  expect(lines[6]).toBe(`${RLM}${MIXED}`)
 })
 
-test('toRtl: CRLF puts the isolate end before the carriage return', () => {
-  expect(toRtl(`${MIXED}\r\nplain\r\n`)).toBe(`${RLI}${MIXED}${PDI}\r\nplain\r\n`)
+test('toRtl: CRLF endings are preserved', () => {
+  expect(toRtl(`${MIXED}\r\nplain\r\n`)).toBe(`${RLM}${MIXED}\r\nplain\r\n`)
+})
+
+test('wrapLineIfNeeded: the mark is the first strong char of the content (RTL) for each block kind', () => {
+  const isRtlStrong = (ch: string) => { const c = ch.codePointAt(0)!; return ch === RLM || (c >= 0x590 && c <= 0x8ff) || (c >= 0xfb1d && c <= 0xfdff) || (c >= 0xfe70 && c <= 0xfeff) }
+  const firstStrong = (s: string) => [...s].find(ch => /[A-Za-z]/.test(ch) || isRtlStrong(ch))
+  for (const prefix of ['## ', '- ', '> ', '']) {
+    const out = wrapLineIfNeeded(prefix + MIXED)
+    const content = out.slice(prefix.length)
+    expect(out.startsWith(prefix)).toBe(true)
+    expect(content.startsWith(RLM)).toBe(true)
+    expect(isRtlStrong(content[0])).toBe(true)
+    expect(firstStrong(content)).toBe(RLM)
+    expect(content.endsWith(String.fromCodePoint(0x2069))).toBe(false)
+  }
+})
+
+// --- live-verified regression cases (desktop app) -------------------------
+
+const RLM_C = String.fromCodePoint(0x200f)
+const mark = (prefix: string, body: string) => `${prefix}${RLM_C}${body}`
+const L_NUM1 = '1. Docker צריך להיות מותקן'
+const L_NUM2 = '2. Node בגרסה 20 לפחות'
+const L_NEST = ['- Setup ראשוני של הסביבה', '  - Docker צריך להיות מותקן', '  - Node בגרסה 20'].join('\n')
+const L_CODE = '`npm install` צריך לרוץ לפני כל בדיקה חדשה'
+const L_BOLD = '**Docker** צריך להיות מותקן ומוגדר מראש לפני שמתחילים'
+const L_NUM_HE = '3 קבצים השתנו ב-PR הזה'
+const L_QUOTE_HE = '> **הערה:** PR חייב לעבור review לפני merge'
+const L_QUOTE_2 = ['> שורה ראשונה בעברית', '> Docker צריך להיות מותקן לפני ההרצה'].join('\n')
+const L_PARA = ['This paragraph starts in English', 'GitHub Actions צריך לרוץ על כל commit חדש'].join('\n')
+const L_TABLE = ['| Step | תיאור |', '|---|---|', '| Build | בניית הפרויקט |'].join('\n')
+const L_ARABIC = 'Deploy يجب أن يتم بعد اختبار كل التغييرات'
+const L_PLAIN = 'Plain English line with `code` and **bold**.'
+const L_FENCE = (f: string) => [`${f}bash`, '# Run שלב ההתקנה הראשוני', 'npm install', f].join('\n')
+const L_HE_LIST = ['- פריט ראשון בעברית', '- Pure English bullet, untouched', '- פריט שלישי בעברית'].join('\n')
+
+test('live: numbered list items are marked after "N. "', () => {
+  expect(toRtl([L_NUM1, L_NUM2].join('\n'))).toBe([mark('1. ', L_NUM1.slice(3)), mark('2. ', L_NUM2.slice(3))].join('\n'))
+})
+
+test('live: nested bullets keep indent and are marked after their prefix', () => {
+  const [a, b, c] = L_NEST.split('\n')
+  expect(toRtl(L_NEST)).toBe([mark('- ', a.slice(2)), mark('  - ', b.slice(4)), mark('  - ', c.slice(4))].join('\n'))
+})
+
+test('live: leading code span is marked at index 0 and stays intact', () => {
+  expect(toRtl(L_CODE)).toBe(mark('', L_CODE))
+  expect(toRtl(L_CODE).includes('`npm install`')).toBe(true)
+})
+
+test('live: leading bold is marked at index 0', () => {
+  expect(toRtl(L_BOLD)).toBe(mark('', L_BOLD))
+})
+
+test('live: Hebrew-leading lines are untouched (digit first, bold Hebrew in quote)', () => {
+  expect(toRtl(L_NUM_HE)).toBe(L_NUM_HE)
+  expect(toRtl(L_QUOTE_HE)).toBe(L_QUOTE_HE)
+})
+
+test('live: blockquote with Hebrew first line and Latin-leading second line', () => {
+  const [a, b] = L_QUOTE_2.split('\n')
+  expect(toRtl(L_QUOTE_2)).toBe([a, mark('> ', b.slice(2))].join('\n'))
+})
+
+test('live: English paragraph line stays, following mixed line is marked', () => {
+  const [a, b] = L_PARA.split('\n')
+  expect(toRtl(L_PARA)).toBe([a, mark('', b)].join('\n'))
+})
+
+test('live: whole table is untouched', () => {
+  expect(toRtl(L_TABLE)).toBe(L_TABLE)
+})
+
+test('live: Latin-leading Arabic line is marked', () => {
+  expect(toRtl(L_ARABIC)).toBe(mark('', L_ARABIC))
+})
+
+test('live: plain English line with code and bold is untouched', () => {
+  expect(toRtl(L_PLAIN)).toBe(L_PLAIN)
+})
+
+test('live: Hebrew comment inside ``` and ~~~ fences is untouched', () => {
+  for (const f of ['```', '~~~']) expect(toRtl(L_FENCE(f))).toBe(L_FENCE(f))
+})
+
+test('live: pure English bullet inside a Hebrew list is untouched', () => {
+  expect(toRtl(L_HE_LIST)).toBe(L_HE_LIST)
+})
+
+test('idempotence: toRtl(toRtl(x)) === toRtl(x) for a mixed multi-line sample', () => {
+  const sample = [L_NUM1, L_NUM2, L_NEST, L_CODE, L_QUOTE_2, L_PARA, L_TABLE, L_ARABIC, L_FENCE('```'), L_PLAIN, L_HE_LIST].join('\n')
+  const once = toRtl(sample)
+  expect(once).not.toBe(sample)
+  expect(toRtl(once)).toBe(once)
+})
+
+// --- known limitations: pin CURRENT behaviour; changing these must be deliberate ---
+
+test('known limitation: apostrophe and digits split words ("don\'t" = 2 words, "v2" = "v")', () => {
+  // Latin words are runs of letters only, so "don't" counts as "don"+"t" and "v2" as "v".
+  // "don't v2 ואז בדיקה": intended 2 Latin vs 2 RTL (tie -> marked), actual 3 vs 2 -> untouched.
+  const s = "don't v2 ואז בדיקה"
+  expect(toRtl(s)).toBe(s)
+  // Where the split does not change the outcome the line is still marked.
+  const t = "Run don't v2 ואז בדיקה של המערכת כולה"
+  expect(toRtl(t)).toBe(mark('', t))
+})
+
+test('known limitation: link target containing ")" is cut at the first ")"', () => {
+  // The target regex stops at the first ")", so the remainder of the target is not ignored.
+  // Plain case still marks (docs=1 Latin vs 2 RTL):
+  const a = '[docs](https://x.com/a_(b)) הוא המקום'
+  expect(toRtl(a)).toBe(mark('', a))
+  // Leftover "cc" after the first ")" is counted as a Latin word: docs+cc = 2 vs 1 RTL -> untouched
+  // (a correct parse would give 1 vs 1 -> marked).
+  const b = '[docs](https://x.com/a_(bb)cc) הוא'
+  expect(toRtl(b)).toBe(b)
 })
 
 // --- through the engine ---------------------------------------------------
@@ -123,22 +271,22 @@ for (const surface of ['terminal', 'desktop'] as const) {
   }
 
   test(`UserMessage: Hebrew-dominant English-leading line gets wrapped (${surface})`, async ($, on) => {
-    expect(await renderEnabled(on, $, 'UserMessage', MIXED)).toBe(`${RLI}${MIXED}${PDI}`)
+    expect(await renderEnabled(on, $, 'UserMessage', MIXED)).toBe(`${RLM}${MIXED}`)
   })
 
   test(`AssistantMessage wraps when enabled (${surface})`, async ($, on) => {
-    expect(await renderEnabled(on, $, 'AssistantMessage', MIXED)).toBe(`${RLI}${MIXED}${PDI}`)
+    expect(await renderEnabled(on, $, 'AssistantMessage', MIXED)).toBe(`${RLM}${MIXED}`)
   })
 
   test(`Mixed multi-line message only wraps the lines that need it (${surface})`, async ($, on) => {
     const lines = (await renderEnabled(on, $, 'UserMessage', MIXED_MULTILINE))?.split('\n')
-    expect(lines).toEqual([HEBREW_LEADING, `${RLI}${MIXED}${PDI}`, PURE_ENGLISH])
+    expect(lines).toEqual([HEBREW_LEADING, `${RLM}${MIXED}`, PURE_ENGLISH])
   })
 
   test(`List item, heading and blockquote prefixes stay at column 0 (${surface})`, async ($, on) => {
     const text = [`- ${MIXED}`, `# ${MIXED}`, `> ${MIXED}`].join('\n')
     const lines = (await renderEnabled(on, $, 'AssistantMessage', text))?.split('\n')
-    expect(lines).toEqual([`- ${RLI}${MIXED}${PDI}`, `# ${RLI}${MIXED}${PDI}`, `> ${RLI}${MIXED}${PDI}`])
+    expect(lines).toEqual([`- ${RLM}${MIXED}`, `# ${RLM}${MIXED}`, `> ${RLM}${MIXED}`])
   })
 
   test(`Fenced code block content is untouched (${surface})`, async ($, on) => {
@@ -150,17 +298,28 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await renderEnabled(on, $, 'AssistantMessage', ENGLISH_WITH_ONE_HEBREW)).toBe(ENGLISH_WITH_ONE_HEBREW)
   })
 
+  test(`Word-count cases are marked or left alone through the engine (${surface})`, async ($, on) => {
+    setup(on)
+    await enable($)
+    for (const [prefix, line] of [['> ', TIE_QUOTE], ['- [ ] ', TASK_ITEM], ['', LINK_LINE], ['', URL_LINE]]) {
+      expect(await render($, 'AssistantMessage', line)).toBe(`${prefix}${RLM}${line.slice(prefix.length)}`)
+    }
+    for (const s of [ENGLISH_DOMINANT_1, ENGLISH_DOMINANT_2, MIXED_ONE_VS_TWO]) {
+      expect(await render($, 'AssistantMessage', s)).toBe(s)
+    }
+  })
+
   test(`Arabic line is wrapped (${surface})`, async ($, on) => {
-    expect(await renderEnabled(on, $, 'AssistantMessage', ARABIC)).toBe(`${RLI}${ARABIC}${PDI}`)
+    expect(await renderEnabled(on, $, 'AssistantMessage', ARABIC)).toBe(`${RLM}${ARABIC}`)
   })
 
   test(`Already-wrapped line is not double-wrapped (${surface})`, async ($, on) => {
-    const wrapped = `${RLI}${MIXED}${PDI}`
+    const wrapped = `${RLM}${MIXED}`
     expect(await renderEnabled(on, $, 'AssistantMessage', wrapped)).toBe(wrapped)
   })
 
-  test(`CRLF line keeps the carriage return outside the isolate (${surface})`, async ($, on) => {
-    expect(await renderEnabled(on, $, 'AssistantMessage', `${MIXED}\r\nx`)).toBe(`${RLI}${MIXED}${PDI}\r\nx`)
+  test(`CRLF line keeps its carriage return (${surface})`, async ($, on) => {
+    expect(await renderEnabled(on, $, 'AssistantMessage', `${MIXED}\r\nx`)).toBe(`${RLM}${MIXED}\r\nx`)
   })
 
   test(`Table row is left untouched (${surface})`, async ($, on) => {
@@ -191,5 +350,28 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await band.press({ key: 'rtl-toggle' })
     expect((await band.find({ key: 'rtl-toggle' }))?.text).toBe(LABEL_ON)
     await band.unmount()
+  })
+
+  test(`Toggling ON then OFF restores the original AssistantMessage text (${surface})`, async ($, on) => {
+    setup(on)
+    const original = [L_NUM1, L_QUOTE_2, L_CODE, L_TABLE].join('\n')
+    expect(await render($, 'AssistantMessage', original)).toBe(original)
+    await enable($)
+    const marked = await render($, 'AssistantMessage', original)
+    expect(marked).toBe(toRtl(original))
+    expect(marked).not.toBe(original)
+    await enable($) // second press turns it off
+    expect(await render($, 'AssistantMessage', original)).toBe(original)
+  })
+
+  test(`Live-verified list, quote, code-span and table cases through the engine (${surface})`, async ($, on) => {
+    setup(on)
+    await enable($)
+    const [a, b] = L_QUOTE_2.split('\n')
+    expect(await render($, 'AssistantMessage', [L_NUM1, L_NUM2].join('\n'))).toBe([mark('1. ', L_NUM1.slice(3)), mark('2. ', L_NUM2.slice(3))].join('\n'))
+    expect(await render($, 'AssistantMessage', L_QUOTE_2)).toBe([a, mark('> ', b.slice(2))].join('\n'))
+    expect(await render($, 'AssistantMessage', L_CODE)).toBe(mark('', L_CODE))
+    expect(await render($, 'AssistantMessage', L_TABLE)).toBe(L_TABLE)
+    expect(await render($, 'AssistantMessage', L_FENCE('~~~'))).toBe(L_FENCE('~~~'))
   })
 }
