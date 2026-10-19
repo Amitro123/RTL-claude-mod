@@ -87,6 +87,14 @@ terminal the result depends on the terminal's own bidi support: many
 terminals do not implement the bidi algorithm at all, and the RLM is
 invisible there but cannot change alignment.
 
+Toggling only affects messages rendered after the press: messages already on
+screen keep the layout they were drawn with until they are rendered again.
+
+Word counting treats any run of Latin letters as one word, so `don't` counts
+as two words and `v2` as one (the digit is ignored); a link target containing
+`)` is only partly excluded from the count. Both are pinned by
+"known limitation" tests.
+
 ## Testing
 
 The text rules are pure functions in `hooks/rtl.ts`, tested directly and through
