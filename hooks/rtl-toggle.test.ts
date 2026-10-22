@@ -256,6 +256,20 @@ test('other RTL scripts (Syriac, Thaana, NKo, Adlam) count as RTL', () => {
   }
 })
 
+test('real model output: Russian/English lines with a Hebrew word stay LTR, Hebrew-dominant ones are marked', () => {
+  // Lines from real Claude answers; the previous version marked all of the first four.
+  for (const s of [
+    'Deploy это нужно сделать сегодня כן',
+    'Fix ошибку в коде לפני ה-release, בבקשה',
+    'Thanks, תודה за вопрос!',
+    '- Откройте `http://localhost:8080` в браузере. Если открылась страница nginx, значит всё работает. Это ваша בדיקה.',
+  ]) expect(toRtl(s)).toBe(s)
+  const meeting = 'Meeting в три часа, נדבר על התקציב החדש' // 4 vs 4: tie goes to RTL
+  expect(toRtl(meeting)).toBe(`${RLM}${meeting}`)
+  const quoted = ['> ```go', '>     fmt.Println("שלום, עולם")', '> ```'].join('\n')
+  expect(toRtl(quoted)).toBe(quoted)
+})
+
 // --- code -----------------------------------------------------------------
 
 test('inline code spans are not counted as LTR words', () => {
