@@ -30,23 +30,32 @@ While the toggle is on, every line of every `UserMessage` and
 **RLM** (RIGHT-TO-LEFT MARK, U+200F, a zero-width strong RTL character) only
 when all of these hold:
 
-- it starts (after any markdown prefix) with a Latin letter;
-- RTL words are at least as many as Latin words. A word is a maximal run of
-  RTL letters (Hebrew, Arabic and their supplement and presentation-form
-  blocks) or of Latin letters, so `ב-GitHub` is one RTL plus one Latin word.
-  The share must be >= `MIN_RTL_WORD_SHARE` (0.5): a tie goes to RTL, and an
-  English sentence with one Hebrew word is left alone. Link targets
-  `](...)`, reference labels `][ref]`, `<scheme://...>` autolinks and bare
-  `http(s)://` / `www.` URLs are ignored when counting (the text itself is
-  never changed).
+- it starts (after any markdown prefix) with an LTR letter;
+- RTL words are at least as many as LTR words. A word is a maximal run of
+  RTL letters or of LTR letters, so `ב-GitHub` is one RTL plus one LTR word.
+  RTL letters are every block Unicode assigns to right-to-left scripts
+  (Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic, Adlam, ... and
+  their presentation forms); any other letter is LTR, so Russian, Greek or
+  accented Latin count exactly like English. The share must be >=
+  `MIN_RTL_WORD_SHARE` (0.5): a tie goes to RTL, and an English or Russian
+  sentence with one Hebrew word is left alone. Inline code spans (`` `x` ``),
+  link targets `](...)`, reference labels `][ref]`, `<scheme://...>`
+  autolinks and bare `http(s)://` / `www.` URLs are ignored when counting
+  (the text itself is never changed).
 
 Everything else is untouched:
 
 - Hebrew/Arabic-leading lines (the bidi algorithm already handles them) and
   lines with no RTL text.
-- Lines inside fenced code blocks (``` or ~~~) and the fence lines themselves.
-- Indented (4 spaces / tab) code lines and table rows (`|`); table rows are
-  skipped entirely rather than wrapped per cell.
+- Lines inside fenced code blocks (``` or ~~~), including fences inside
+  blockquotes and list items, and the fence lines themselves.
+- Indented (4 spaces / tab) code lines.
+
+Table rows (`|`) are handled per cell: each cell that meets the rules above
+gets the RLM after its leading whitespace, so the row keeps its structure
+(`\|` stays a literal pipe). In the terminal, table rows are left untouched:
+it has no bidi layout to fix, and an extra character inside a cell could
+skew its column widths.
 - Lines already marked (RLM, or the legacy RLI/RLE from older versions).
 
 The markdown prefix (indentation, `>` quotes, `-`/`*`/`+`/`1.` list markers,
@@ -66,9 +75,28 @@ While the toggle is off, no message text is modified.
 ## Usage
 
 1. Open Claude Code with this mod enabled.
-2. Click the button above the prompt to turn the correction on or off.
+2. Click the button above the prompt, or run `/rtl`, to turn the correction
+   on or off. The command works on every surface, including VS Code and
+   mobile, which may not show the button:
+   - `/rtl` toggles
+   - `/rtl on` / `/rtl off` set the state
+   - `/rtl status` reports it
 3. Messages are re-rendered according to the rules above for as long as the
    toggle stays on, for the duration of the session.
+
+## Performance
+
+Messages are redrawn far more often than they change (every streamed chunk
+redraws the growing answer). The mod therefore:
+
+- returns text with no RTL character untouched after a single scan;
+- caches finished results (LRU, bounded to ~4M characters in total);
+- reuses the already-converted complete lines when the next text extends the
+  previous one, so a streaming answer only converts its newest line(s);
+- uses only patterns that stay linear on adversarial input (long whitespace
+  runs, thousands of `](` or `<a://` on one line).
+
+On a 1MB message a redraw dropped from ~35ms to well under 1ms.
 
 ### Before / after
 
@@ -90,10 +118,10 @@ invisible there but cannot change alignment.
 Toggling only affects messages rendered after the press: messages already on
 screen keep the layout they were drawn with until they are rendered again.
 
-Word counting treats any run of Latin letters as one word, so `don't` counts
-as two words and `v2` as one (the digit is ignored); a link target containing
-`)` is only partly excluded from the count. Both are pinned by
-"known limitation" tests.
+Word counting treats any run of letters as one word, so `don't` counts as
+two words, `v2` as one (the digit is ignored), and a run of CJK characters
+without spaces as a single word. The first two are pinned by a
+"known limitation" test.
 
 ## Testing
 
@@ -109,3 +137,7 @@ claude plugin test <path-to-this-folder>
 ```
 /plugin install rtl-toggle --marketplace Amitro123/RTL-claude-mod
 ```
+
+## License
+
+[MIT](./LICENSE). PRs welcome.
