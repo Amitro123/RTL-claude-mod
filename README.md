@@ -49,8 +49,13 @@ Everything else is untouched:
   lines with no RTL text.
 - Lines inside fenced code blocks (``` or ~~~), including fences inside
   blockquotes and list items, and the fence lines themselves.
-- Indented (4 spaces / tab) code lines and table rows (`|`); table rows are
-  skipped entirely rather than wrapped per cell.
+- Indented (4 spaces / tab) code lines.
+
+Table rows (`|`) are handled per cell: each cell that meets the rules above
+gets the RLM after its leading whitespace, so the row keeps its structure
+(`\|` stays a literal pipe). In the terminal, table rows are left untouched:
+it has no bidi layout to fix, and an extra character inside a cell could
+skew its column widths.
 - Lines already marked (RLM, or the legacy RLI/RLE from older versions).
 
 The markdown prefix (indentation, `>` quotes, `-`/`*`/`+`/`1.` list markers,

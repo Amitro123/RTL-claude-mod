@@ -270,6 +270,40 @@ test('real model output: Russian/English lines with a Hebrew word stay LTR, Hebr
   expect(toRtl(quoted)).toBe(quoted)
 })
 
+// --- tables ---------------------------------------------------------------
+
+const cells = { tableCells: true }
+
+test('tables: only qualifying cells are marked, after their leading whitespace', () => {
+  // From a real answer: Hebrew-dominant cell that starts with an English word.
+  const row = '| קונקרנטיות | threads ו-asyncio; ה-GIL מגביל הרצה מקבילית של קוד Python | goroutines וערוצים (channels) מובנים |'
+  expect(wrapLineIfNeeded(row, cells)).toBe(
+    `| קונקרנטיות | ${RLM}threads ו-asyncio; ה-GIL מגביל הרצה מקבילית של קוד Python | ${RLM}goroutines וערוצים (channels) מובנים |`,
+  )
+  const plain = '| Garbage collection | Garbage collection | ניהול זיכרון |'
+  expect(wrapLineIfNeeded(plain, cells)).toBe(plain)
+})
+
+test('tables: rows without outer pipes, escaped pipes and code spans', () => {
+  expect(wrapLineIfNeeded(`| x | ${MIXED}`, cells)).toBe(`| x | ${RLM}${MIXED}`)
+  // `\|` is a literal pipe inside the cell, so the cell is one cell (2 RTL vs 1 LTR).
+  const esc = '| a\\|b עם עוד | y |'
+  expect(wrapLineIfNeeded(esc, cells)).toBe('| a\\|b עם עוד | y |'.replace('| a', `| ${RLM}a`))
+  // A code span does not count as LTR words inside a cell either.
+  const code = '| `npm ci --save` מתקין תלויות | z |'
+  expect(wrapLineIfNeeded(code, cells)).toBe(code.replace('| `', `| ${RLM}\``))
+})
+
+test('tables: idempotent, untouched by default and inside fences; header/delimiter rows keep structure', () => {
+  const table = ['| Step | תיאור |', '|:---|---:|', `| ${MIXED} | ${MIXED} |`].join('\n')
+  const once = toRtl(table, cells)
+  expect(once.split('\n')).toEqual(['| Step | תיאור |', '|:---|---:|', `| ${RLM}${MIXED} | ${RLM}${MIXED} |`])
+  expect(toRtl(once, cells)).toBe(once)
+  expect(toRtl(table)).toBe(table)
+  const fenced = ['```', `| ${MIXED} |`, '```'].join('\n')
+  expect(toRtl(fenced, cells)).toBe(fenced)
+})
+
 // --- code -----------------------------------------------------------------
 
 test('inline code spans are not counted as LTR words', () => {
@@ -409,9 +443,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await renderEnabled(on, $, 'AssistantMessage', `${MIXED}\r\nx`)).toBe(`${RLM}${MIXED}\r\nx`)
   })
 
-  test(`Table row is left untouched (${surface})`, async ($, on) => {
+  test(`Table cells are marked except in the terminal (${surface})`, async ($, on) => {
     const row = `| ${MIXED} | x |`
-    expect(await renderEnabled(on, $, 'AssistantMessage', row)).toBe(row)
+    const want = surface === 'terminal' ? row : `| ${RLM}${MIXED} | x |`
+    expect(await renderEnabled(on, $, 'AssistantMessage', row)).toBe(want)
   })
 
   test(`Hebrew-leading, pure-English, punctuation, empty and blank lines are untouched (${surface})`, async ($, on) => {

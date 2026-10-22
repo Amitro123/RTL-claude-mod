@@ -63,7 +63,7 @@ export const register: Register = on => {
     on('ui.render', { component }, async ($, e, next) => {
       if (!(await read($, rtlEnabled))) return next(e)
 
-      return next({ ...e, props: { ...e.props, text: toRtl(e.props.text) } })
+      return next({ ...e, props: { ...e.props, text: toRtl(e.props.text, { tableCells: e.surface !== 'terminal' }) } })
     })
   }
 }

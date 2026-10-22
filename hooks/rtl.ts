@@ -92,32 +92,66 @@ function stripCodeSpans(s: string): string {
   return out + s.slice(pos)
 }
 
-// Mark one line (no newline, no trailing \r) when RTL words are at least as many as
-// LTR words but it starts with an LTR letter. Markdown prefixes stay in front of the RLM.
-export function wrapLineIfNeeded(line: string): string {
-  if (!RTL_CHAR.test(line)) return line // no RTL content at all
-  if (line.trimStart().startsWith('|')) return line // table row: left untouched
-  if (INDENTED_CODE_RE.test(line) && !LIST_ITEM_RE.test(line)) return line // indented code block
+export type RtlOptions = {
+  // Mark table cells individually (see wrapTableRow). Off for the terminal,
+  // which has no bidi layout to fix and measures column widths itself.
+  tableCells?: boolean
+}
 
-  const prefix = PREFIX_RE.exec(line)![0]
-  const rest = line.slice(prefix.length)
-  if (rest.startsWith(RLM) || rest.startsWith(LEGACY_RLI) || rest.startsWith(LEGACY_RLE)) return line // already marked
+// Whether a line or cell body (markdown prefix already removed) should get a
+// leading RLM: it starts with an LTR letter and RTL words are at least as many
+// as LTR words.
+function needsMark(rest: string): boolean {
+  if (rest.startsWith(RLM) || rest.startsWith(LEGACY_RLI) || rest.startsWith(LEGACY_RLE)) return false // already marked
 
   const first = FIRST_LETTER.exec(rest)
-  if (!first || RTL_CHAR.test(first[0])) return line // empty, or already RTL-leading
+  if (!first || RTL_CHAR.test(first[0])) return false // empty, or already RTL-leading
 
   const countable = LINK_NOISE_RES.reduce((t, re) => t.replace(re, ' '), stripCodeSpans(rest))
   const rtl = (countable.match(RTL_WORDS_G) ?? []).length
   const ltr = (countable.match(LTR_WORDS_G) ?? []).length
-  if (rtl < 1 || rtl / (rtl + ltr) < MIN_RTL_WORD_SHARE) return line // LTR-dominant
+  return rtl >= 1 && rtl / (rtl + ltr) >= MIN_RTL_WORD_SHARE
+}
 
-  return `${prefix}${RLM}${rest}`
+// Mark each qualifying cell of a `|`-led table row right after its leading
+// whitespace, so renderers that pick each cell's direction from its first
+// strong char right-align it. Cells split on unescaped `|` (GFM: `\|` inside
+// a cell, code spans included, is a literal pipe).
+function wrapTableRow(line: string): string {
+  let out = ''
+  let cell = -1 // start of the current cell's text, -1 before the first pipe
+  const flush = (end: number) => {
+    const body = line.slice(cell, end)
+    const lead = body.length - body.trimStart().length
+    out += needsMark(body.slice(lead)) ? body.slice(0, lead) + RLM + body.slice(lead) : body
+  }
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '\\') { i++; continue }
+    if (line[i] !== '|') continue
+    if (cell < 0) out += line.slice(0, i + 1)
+    else { flush(i); out += '|' }
+    cell = i + 1
+  }
+  flush(line.length) // a row without a trailing pipe ends in a cell; whitespace is never marked
+  return out
+}
+
+// Mark one line (no newline, no trailing \r) when RTL words are at least as many as
+// LTR words but it starts with an LTR letter. Markdown prefixes stay in front of the RLM.
+export function wrapLineIfNeeded(line: string, options: RtlOptions = {}): string {
+  if (!RTL_CHAR.test(line)) return line // no RTL content at all
+  if (line.trimStart().startsWith('|')) return options.tableCells ? wrapTableRow(line) : line
+  if (INDENTED_CODE_RE.test(line) && !LIST_ITEM_RE.test(line)) return line // indented code block
+
+  const prefix = PREFIX_RE.exec(line)![0]
+  const rest = line.slice(prefix.length)
+  return needsMark(rest) ? `${prefix}${RLM}${rest}` : line
 }
 
 type Fence = { char: string; length: number } | null
 
 // Rewrite a run of lines starting in fence state `fence`; returns the new state.
-function convertLines(lines: string[], fence: Fence): { out: string[]; fence: Fence } {
+function convertLines(lines: string[], fence: Fence, options: RtlOptions): { out: string[]; fence: Fence } {
   const out = lines.map(raw => {
     const hasCr = raw.endsWith('\r')
     const line = hasCr ? raw.slice(0, -1) : raw
@@ -134,7 +168,7 @@ function convertLines(lines: string[], fence: Fence): { out: string[]; fence: Fe
       return raw
     }
 
-    return wrapLineIfNeeded(line) + (hasCr ? '\r' : '')
+    return wrapLineIfNeeded(line, options) + (hasCr ? '\r' : '')
   })
   return { out, fence }
 }
@@ -143,47 +177,56 @@ function convertLines(lines: string[], fence: Fence): { out: string[]; fence: Fe
 // redraws the growing answer, and scrolling or toggling redraws old ones.
 // Finished results are kept in a small LRU bounded by total size, and the
 // last converted text's complete lines are reused when the next text extends
-// it, so a streaming answer only converts its newest lines.
-const CACHE_BUDGET = 4_000_000 // chars, across all cached results
-const cache = new Map<string, string>()
-let cacheSize = 0
-let stream: { src: string; out: string; fence: Fence } = { src: '', out: '', fence: null }
+// it, so a streaming answer only converts its newest lines. One memo per set
+// of options, since they change the result.
+const CACHE_BUDGET = 4_000_000 // chars, across all cached results of one memo
 
-function remember(text: string, result: string) {
+type Memo = {
+  cache: Map<string, string>
+  size: number
+  stream: { src: string; out: string; fence: Fence }
+}
+const memos = new Map<boolean, Memo>()
+
+function remember(memo: Memo, text: string, result: string) {
   if (text.length > CACHE_BUDGET) return
-  cache.set(text, result)
-  cacheSize += text.length
-  for (const [k] of cache) {
-    if (cacheSize <= CACHE_BUDGET) break
-    cache.delete(k)
-    cacheSize -= k.length
+  memo.cache.set(text, result)
+  memo.size += text.length
+  for (const [k] of memo.cache) {
+    if (memo.size <= CACHE_BUDGET) break
+    memo.cache.delete(k)
+    memo.size -= k.length
   }
 }
 
 // Rewrite a whole message: skips fenced code blocks (and their fence lines)
 // and keeps CRLF endings intact.
-export function toRtl(text: string): string {
+export function toRtl(text: string, options: RtlOptions = {}): string {
   if (!RTL_CHAR.test(text)) return text
 
-  const hit = cache.get(text)
+  const key = !!options.tableCells
+  let memo = memos.get(key)
+  if (!memo) memos.set(key, (memo = { cache: new Map(), size: 0, stream: { src: '', out: '', fence: null } }))
+
+  const hit = memo.cache.get(text)
   if (hit !== undefined) {
-    cache.delete(text) // refresh LRU position
-    cache.set(text, hit)
+    memo.cache.delete(text) // refresh LRU position
+    memo.cache.set(text, hit)
     return hit
   }
 
-  const base = stream.src && text.startsWith(stream.src) ? stream : { src: '', out: '', fence: null }
+  const base = memo.stream.src && text.startsWith(memo.stream.src) ? memo.stream : { src: '', out: '', fence: null }
   const cut = text.lastIndexOf('\n') + 1 // end of the last complete line
   let head = base.out
   let fence = base.fence
   if (cut > base.src.length) {
-    const done = convertLines(text.slice(base.src.length, cut - 1).split('\n'), fence)
+    const done = convertLines(text.slice(base.src.length, cut - 1).split('\n'), fence, options)
     head += done.out.join('\n') + '\n'
     fence = done.fence
-    stream = { src: text.slice(0, cut), out: head, fence }
+    memo.stream = { src: text.slice(0, cut), out: head, fence }
   }
-  const result = head + convertLines([text.slice(cut)], fence).out[0]
+  const result = head + convertLines([text.slice(cut)], fence, options).out[0]
 
-  remember(text, result)
+  remember(memo, text, result)
   return result
 }
