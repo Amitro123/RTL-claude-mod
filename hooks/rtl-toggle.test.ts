@@ -221,15 +221,88 @@ test('known limitation: apostrophe and digits split words ("don\'t" = 2 words, "
   expect(toRtl(t)).toBe(mark('', t))
 })
 
-test('known limitation: link target containing ")" is cut at the first ")"', () => {
-  // The target regex stops at the first ")", so the remainder of the target is not ignored.
-  // Plain case still marks (docs=1 Latin vs 2 RTL):
+test('link target with one level of parentheses is ignored whole', () => {
   const a = '[docs](https://x.com/a_(b)) הוא המקום'
   expect(toRtl(a)).toBe(mark('', a))
-  // Leftover "cc" after the first ")" is counted as a Latin word: docs+cc = 2 vs 1 RTL -> untouched
-  // (a correct parse would give 1 vs 1 -> marked).
+  // "cc" after the inner ")" is still part of the target: docs vs הוא = 1 vs 1 -> marked.
   const b = '[docs](https://x.com/a_(bb)cc) הוא'
-  expect(toRtl(b)).toBe(b)
+  expect(toRtl(b)).toBe(mark('', b))
+})
+
+// --- other LTR scripts ----------------------------------------------------
+
+test('Cyrillic words count as LTR, not as nothing', () => {
+  // Was: Latin-leading, Russian ignored -> 1 vs 1 -> wrongly marked.
+  const ruDominant = 'Deploy это нужно сделать сегодня כן'
+  expect(wrapLineIfNeeded(ruDominant)).toBe(ruDominant)
+  // Was: first strong char searched among Latin/RTL only -> Hebrew -> wrongly untouched.
+  const ruLeading = 'Запусти את כל הבדיקות לפני merge'
+  expect(wrapLineIfNeeded(ruLeading)).toBe(`${RLM}${ruLeading}`)
+  const ruOnly = 'Привет, мир'
+  expect(wrapLineIfNeeded(ruOnly)).toBe(ruOnly)
+})
+
+test('Greek and accented Latin are LTR; combining marks do not split a word', () => {
+  const greek = 'Γεια σου κόσμε שלום'
+  expect(wrapLineIfNeeded(greek)).toBe(greek)
+  const nfd = 'Cafe\u0301 עם חלב' // "Café" decomposed: still one word -> 2 RTL vs 1 LTR
+  expect(wrapLineIfNeeded(nfd)).toBe(`${RLM}${nfd}`)
+})
+
+test('other RTL scripts (Syriac, Thaana, NKo, Adlam) count as RTL', () => {
+  for (const w of ['\u0710\u0712\u0713', '\u0780\u0781\u0782', '\u07CA\u07CB\u07CC', '\u{1E900}\u{1E901}']) {
+    const s = `Note ${w} ${w}`
+    expect(wrapLineIfNeeded(s)).toBe(`${RLM}${s}`)
+  }
+})
+
+// --- code -----------------------------------------------------------------
+
+test('inline code spans are not counted as LTR words', () => {
+  // Without the span: 3 LTR vs 2 RTL. With it ignored: 1 vs 2 -> marked.
+  const s = 'Run `npm install --save` ואז בדוק'
+  expect(wrapLineIfNeeded(s)).toBe(`${RLM}${s}`)
+  const dbl = 'Run ``a ` b c d`` ואז בדוק'
+  expect(wrapLineIfNeeded(dbl)).toBe(`${RLM}${dbl}`)
+  // An unclosed backtick is literal text, so its words still count.
+  const open = 'Run `npm install --save ואז בדוק'
+  expect(wrapLineIfNeeded(open)).toBe(open)
+})
+
+test('fenced code inside blockquotes and list items is untouched', () => {
+  for (const [o, c] of [['> ```', '> ```'], ['- ```ts', '  ```'], ['> > ~~~', '> > ~~~']]) {
+    const text = [o, `> ${MIXED}`, c, MIXED].join('\n')
+    expect(toRtl(text)).toBe([o, `> ${MIXED}`, c, `${RLM}${MIXED}`].join('\n'))
+  }
+})
+
+// --- performance ----------------------------------------------------------
+
+test('pathological lines are linear, not quadratic', () => {
+  const lines = ['a א ' + '](x'.repeat(30000), ' '.repeat(30000) + 'x א', 'a א ' + '<a://'.repeat(20000), 'a א ' + '`'.repeat(1) + ' x`` '.repeat(10000)]
+  for (const line of lines) {
+    const t = Date.now()
+    wrapLineIfNeeded(line)
+    expect(Date.now() - t).toBeLessThan(200)
+  }
+})
+
+test('streaming: converting chunk by chunk equals converting each prefix from scratch', () => {
+  const full = [L_NUM1, '```', MIXED, '```', L_QUOTE_2, '> ```', MIXED, '> ```', L_PARA, MIXED].join('\n')
+  const reset = (i: number) => toRtl(`reset ${i} א\n`) // unrelated text: the next call cannot reuse a prefix
+  // A trailing "\n" does not change any line's result but gives a distinct cache key.
+  const fresh = Array.from({ length: full.length }, (_, i) => (reset(i), toRtl(full.slice(0, i + 1) + '\n').slice(0, -1)))
+  reset(-1)
+  for (let i = 0; i < full.length; i++) expect(toRtl(full.slice(0, i + 1))).toBe(fresh[i])
+  expect(fresh[full.length - 1]).toContain(`${RLM}${MIXED}`)
+})
+
+test('streaming a large message stays fast per chunk', () => {
+  const full = ('Mixed עברית מאוד שלום text with `code` ועוד\n').repeat(20000)
+  toRtl(full.slice(0, full.length - 100))
+  const t = Date.now()
+  for (let i = 99; i > 0; i -= 9) toRtl(full.slice(0, full.length - i))
+  expect(Date.now() - t).toBeLessThan(100)
 })
 
 // --- through the engine ---------------------------------------------------
@@ -362,6 +435,22 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(marked).not.toBe(original)
     await enable($) // second press turns it off
     expect(await render($, 'AssistantMessage', original)).toBe(original)
+  })
+
+  test(`/rtl toggles, sets and reports the same state as the button (${surface})`, async ($, on) => {
+    setup(on)
+    const run = async (args: string) => (await ($ as any).command.run({ command: 'rtl', args })).text
+    expect(await run('status')).toContain('off')
+    expect(await run('')).toContain('on')
+    expect(await render($, 'AssistantMessage', MIXED)).toBe(`${RLM}${MIXED}`)
+    expect(await run('on')).toContain('on')
+    expect(await run('off')).toContain('off')
+    expect(await render($, 'AssistantMessage', MIXED)).toBe(MIXED)
+    expect(await run('bogus')).toContain('Usage')
+    const band = await $.ui.mount({ plugin: 'rtl-toggle', surface, component: 'AbovePrompt', props: {} as any })
+    await run('on')
+    expect((await band.find({ key: 'rtl-toggle' }))?.text).toBe(LABEL_ON)
+    await band.unmount()
   })
 
   test(`Live-verified list, quote, code-span and table cases through the engine (${surface})`, async ($, on) => {

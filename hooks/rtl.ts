@@ -5,91 +5,185 @@
 // automatic direction (dir=auto / UBA rule P2) give the block an RTL base
 // direction and right alignment. Isolates (RLI...PDI) are not used because
 // P2 skips isolate contents, leaving such blocks LTR-aligned.
-export const RLM = '\u200F'
+export const RLM = '‏'
 // Legacy controls: no longer emitted, still recognised by the double-mark
 // guard so text marked by an older version is not marked again.
-const LEGACY_RLI = '\u2067'
-const LEGACY_RLE = '\u202B'
+const LEGACY_RLI = '⁧'
+const LEGACY_RLE = '‫'
 
-// Dominance is counted in WORDS (maximal runs of RTL letters or of Latin
+// Dominance is counted in WORDS (maximal runs of RTL letters or of LTR
 // letters), not letters. A line is marked when it has at least one RTL word and
-// rtlWords / (rtlWords + latinWords) >= MIN_RTL_WORD_SHARE, i.e. RTL words are
-// at least as many as Latin words: a tie goes to RTL.
+// rtlWords / (rtlWords + ltrWords) >= MIN_RTL_WORD_SHARE, i.e. RTL words are
+// at least as many as LTR words: a tie goes to RTL.
 export const MIN_RTL_WORD_SHARE = 0.5
 
-// Hebrew U+0590-05FF, Arabic U+0600-06FF, Arabic Supplement U+0750-077F,
-// Hebrew presentation forms U+FB1D-FB4F, Arabic presentation forms-A
-// U+FB50-FDFF and forms-B U+FE70-FEFF.
-const RTL_RANGES = String.raw`\u0590-\u06FF\u0750-\u077F\uFB1D-\uFDFF\uFE70-\uFEFF`
-const RTL_CHAR = new RegExp(`[${RTL_RANGES}]`)
-const RTL_WORDS_G = new RegExp(`[${RTL_RANGES}]+`, 'g')
-// Latin words: Basic Latin + Latin-1 Supplement + Latin Extended-A/B letters.
-const LATIN_WORDS_G = /[A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F]+/g
-const FIRST_STRONG = new RegExp(String.raw`[A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F${RTL_RANGES}]`)
+// Every block Unicode assigns to right-to-left scripts (the ranges UAX #9
+// defaults to R/AL): Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic
+// and the Arabic supplements/extensions (U+0590-08FF), Hebrew and Arabic
+// presentation forms (U+FB1D-FDFF, U+FE70-FEFF), and the historic and modern
+// RTL scripts of planes 1 (U+10800-10FFF: Hanifi Rohingya, Yezidi, ...) and
+// U+1E800-1EFFF (Adlam, Arabic mathematical). Explicit ranges are ~4x faster
+// than \p{Script=...} lookups. Any other letter (Latin, Cyrillic, Greek, CJK,
+// ...) is LTR, so a Russian word counts against the RTL share like an English one.
+const RTL_RANGES = String.raw`\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}`
+const RTL_CHAR = new RegExp(`[${RTL_RANGES}]`, 'u')
+const RTL_WORDS_G = new RegExp(`[${RTL_RANGES}]+`, 'gu')
+// LTR word: a letter outside the RTL blocks (`[^\P{L}<rtl>]`), then more such
+// letters or combining marks (Devanagari vowel signs, decomposed accents).
+const LTR_LETTER = String.raw`[^\P{L}${RTL_RANGES}]`
+const LTR_WORDS_G = new RegExp(String.raw`${LTR_LETTER}(?:${LTR_LETTER}|\p{M})*`, 'gu')
+const FIRST_LETTER = /\p{L}/u
 
 // Leading markdown prefix that must stay at column 0 of the rendered line:
 // indentation, blockquote markers, then a list marker (with optional task
-// checkbox) or an ATX heading marker.
+// checkbox) or an ATX heading marker. Each whitespace run belongs to exactly
+// one quantifier, so a failed match cannot backtrack quadratically.
+const QUOTES = String.raw`[ \t]*(?:>[ \t]*)*`
 const LIST_MARKER = String.raw`(?:[-*+]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?`
-const PREFIX_RE = new RegExp(String.raw`^([ \t]*(?:>[ \t]?)*[ \t]*(?:${LIST_MARKER}|#{1,6}[ \t]+)?)`)
-const LIST_ITEM_RE = new RegExp(String.raw`^[ \t]*(?:>[ \t]?)*[ \t]*${LIST_MARKER}`)
+const PREFIX_RE = new RegExp(String.raw`^${QUOTES}(?:${LIST_MARKER}|#{1,6}[ \t]+)?`)
+const LIST_ITEM_RE = new RegExp(String.raw`^${QUOTES}${LIST_MARKER}`)
 // Link syntax removed before counting words (never from the output text):
-// `](target)` of links/images (the bracket text stays), `][ref]` labels,
-// <scheme://...> autolinks and bare http(s)/www URLs.
+// `](target)` of links/images (one level of parentheses allowed in the target),
+// `][ref]` labels, <scheme://...> autolinks and bare http(s)/www URLs. Every
+// pattern stops at the next opener, so none can rescan a line quadratically.
 const LINK_NOISE_RES = [
-  /\]\([^)]*\)/g,
+  /\]\((?:[^()\n]|\([^()\n]*\))*\)/g,
   /\]\[[^\]]*\]/g,
-  /<[A-Za-z][A-Za-z0-9+.-]*:\/\/[^>\s]*>/g,
+  /<[A-Za-z][A-Za-z0-9+.-]*:\/\/[^<>\s]*>/g,
   /https?:\/\/\S+/gi,
   /www\.\S+/gi,
 ]
 const INDENTED_CODE_RE = /^(?: {4}|\t)/
-const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/
+// Fences are recognised inside blockquotes and list items too (`> ```ts`).
+const FENCE_RE = /^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/
+
+// Replace inline code spans (`x`, ``x ` y``) with a space: identifiers and
+// commands inside them are not prose and must not count as LTR words. A span
+// closes at the next backtick run of the same length (CommonMark); an opener
+// with no closer is literal. Linear: closers are found via a precomputed table.
+function stripCodeSpans(s: string): string {
+  if (!s.includes('`')) return s
+  const starts: number[] = []
+  const lens: number[] = []
+  for (let i = 0; i < s.length; ) {
+    if (s[i] !== '`') { i++; continue }
+    let j = i
+    while (s[j] === '`') j++
+    starts.push(i)
+    lens.push(j - i)
+    i = j
+  }
+  // closer[k]: index of the next run with the same length as run k, or -1.
+  const closer = new Array<number>(lens.length)
+  const seen = new Map<number, number>()
+  for (let k = lens.length - 1; k >= 0; k--) {
+    closer[k] = seen.get(lens[k]!) ?? -1
+    seen.set(lens[k]!, k)
+  }
+  let out = ''
+  let pos = 0
+  for (let k = 0; k < lens.length; k++) {
+    const c = closer[k]!
+    if (c < 0) continue
+    out += s.slice(pos, starts[k]) + ' '
+    pos = starts[c]! + lens[c]!
+    k = c
+  }
+  return out + s.slice(pos)
+}
 
 // Mark one line (no newline, no trailing \r) when RTL words are at least as many as
-// Latin words but it starts with a Latin letter. Markdown prefixes stay in front of the RLM.
+// LTR words but it starts with an LTR letter. Markdown prefixes stay in front of the RLM.
 export function wrapLineIfNeeded(line: string): string {
   if (!RTL_CHAR.test(line)) return line // no RTL content at all
   if (line.trimStart().startsWith('|')) return line // table row: left untouched
   if (INDENTED_CODE_RE.test(line) && !LIST_ITEM_RE.test(line)) return line // indented code block
 
-  const prefix = (PREFIX_RE.exec(line) ?? [''])[0]
+  const prefix = PREFIX_RE.exec(line)![0]
   const rest = line.slice(prefix.length)
   if (rest.startsWith(RLM) || rest.startsWith(LEGACY_RLI) || rest.startsWith(LEGACY_RLE)) return line // already marked
 
-  const first = FIRST_STRONG.exec(rest)
+  const first = FIRST_LETTER.exec(rest)
   if (!first || RTL_CHAR.test(first[0])) return line // empty, or already RTL-leading
 
-  const countable = LINK_NOISE_RES.reduce((t, re) => t.replace(re, ' '), rest)
+  const countable = LINK_NOISE_RES.reduce((t, re) => t.replace(re, ' '), stripCodeSpans(rest))
   const rtl = (countable.match(RTL_WORDS_G) ?? []).length
-  const latin = (countable.match(LATIN_WORDS_G) ?? []).length
-  if (rtl < 1 || rtl / (rtl + latin) < MIN_RTL_WORD_SHARE) return line // Latin-dominant
+  const ltr = (countable.match(LTR_WORDS_G) ?? []).length
+  if (rtl < 1 || rtl / (rtl + ltr) < MIN_RTL_WORD_SHARE) return line // LTR-dominant
 
   return `${prefix}${RLM}${rest}`
+}
+
+type Fence = { char: string; length: number } | null
+
+// Rewrite a run of lines starting in fence state `fence`; returns the new state.
+function convertLines(lines: string[], fence: Fence): { out: string[]; fence: Fence } {
+  const out = lines.map(raw => {
+    const hasCr = raw.endsWith('\r')
+    const line = hasCr ? raw.slice(0, -1) : raw
+    const m = FENCE_RE.exec(line)
+    const marker = m?.[1] ?? ''
+    const info = m?.[2] ?? ''
+
+    if (fence) {
+      if (m && marker[0] === fence.char && marker.length >= fence.length && info.trim() === '') fence = null
+      return raw
+    }
+    if (m && !(marker[0] === '`' && info.includes('`'))) {
+      fence = { char: marker[0]!, length: marker.length }
+      return raw
+    }
+
+    return wrapLineIfNeeded(line) + (hasCr ? '\r' : '')
+  })
+  return { out, fence }
+}
+
+// Messages are redrawn far more often than they change: every streamed chunk
+// redraws the growing answer, and scrolling or toggling redraws old ones.
+// Finished results are kept in a small LRU bounded by total size, and the
+// last converted text's complete lines are reused when the next text extends
+// it, so a streaming answer only converts its newest lines.
+const CACHE_BUDGET = 4_000_000 // chars, across all cached results
+const cache = new Map<string, string>()
+let cacheSize = 0
+let stream: { src: string; out: string; fence: Fence } = { src: '', out: '', fence: null }
+
+function remember(text: string, result: string) {
+  if (text.length > CACHE_BUDGET) return
+  cache.set(text, result)
+  cacheSize += text.length
+  for (const [k] of cache) {
+    if (cacheSize <= CACHE_BUDGET) break
+    cache.delete(k)
+    cacheSize -= k.length
+  }
 }
 
 // Rewrite a whole message: skips fenced code blocks (and their fence lines)
 // and keeps CRLF endings intact.
 export function toRtl(text: string): string {
-  let fence: { char: string; length: number } | null = null
+  if (!RTL_CHAR.test(text)) return text
 
-  return text
-    .split('\n')
-    .map(raw => {
-      const hasCr = raw.endsWith('\r')
-      const line = hasCr ? raw.slice(0, -1) : raw
-      const m = FENCE_RE.exec(line)
+  const hit = cache.get(text)
+  if (hit !== undefined) {
+    cache.delete(text) // refresh LRU position
+    cache.set(text, hit)
+    return hit
+  }
 
-      if (fence) {
-        if (m && m[1][0] === fence.char && m[1].length >= fence.length && m[2].trim() === '') fence = null
-        return raw
-      }
-      if (m && !(m[1][0] === '`' && m[2].includes('`'))) {
-        fence = { char: m[1][0], length: m[1].length }
-        return raw
-      }
+  const base = stream.src && text.startsWith(stream.src) ? stream : { src: '', out: '', fence: null }
+  const cut = text.lastIndexOf('\n') + 1 // end of the last complete line
+  let head = base.out
+  let fence = base.fence
+  if (cut > base.src.length) {
+    const done = convertLines(text.slice(base.src.length, cut - 1).split('\n'), fence)
+    head += done.out.join('\n') + '\n'
+    fence = done.fence
+    stream = { src: text.slice(0, cut), out: head, fence }
+  }
+  const result = head + convertLines([text.slice(cut)], fence).out[0]
 
-      return wrapLineIfNeeded(line) + (hasCr ? '\r' : '')
-    })
-    .join('\n')
+  remember(text, result)
+  return result
 }
